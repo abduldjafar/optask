@@ -180,6 +180,24 @@ erDiagram
   - **Daily Facts:** `fact_daily_attendance`, `fact_daily_assessment` — rolled-up per class × date
 - **Gold:** Business-ready output (`class_daily_performance`) built by joining Silver facts
 
+**Why each table exists:**
+
+| Table | Layer | Why it exists |
+|---|---|---|
+| `students` | Silver | Master reference for student-to-class mapping. Every fact table joins back to this. |
+| `attendance` | Silver | Cleaned event log. Raw data has duplicates and wrong types — this is the source of truth. |
+| `assessments` | Silver | Same as attendance. Cleaned and typed before any aggregation. |
+| `fact_student_performance` | Silver | **Per-student metrics** (attendance rate, avg score). Enables student-level analysis and leaderboards. |
+| `fact_class_summary` | Silver | **Per-class snapshot** (total students, active students, class avg). Enables class-level reporting without re-scanning all students each time. |
+| `fact_daily_attendance` | Silver | **Daily grain attendance** per class. Needed so Gold can join at class × date level without re-aggregating raw events every day. |
+| `fact_daily_assessment` | Silver | **Daily grain assessment** per class. Same rationale — pre-aggregated so Gold stays thin and fast. |
+| `class_daily_performance` | Gold | **The final answer** — combines attendance + assessment + class info into one query-ready table. This is what dashboards/ClickHouse queries read. |
+
+> **Why two Silver fact granularities?**
+> `fact_student_performance` answers *"how is each student doing overall?"*
+> `fact_daily_attendance/assessment` answers *"what happened in each class on each day?"*
+> These are different business questions at different grains — combining them into one table would either explode row count or lose detail.
+
 ---
 
 ## 🏛️ Design Decisions
@@ -806,6 +824,78 @@ pip install -r requirements.txt --force-reinstall
 - **Gold:** `s3://datalake/gold/<table>/` (Delta Lake)
 - **Audit:** `s3://datalake/system/audit_log/*.parquet`
 - **Metrics:** `s3://datalake/system/pipeline_metrics/*.parquet`
+
+---
+
+## 📧 Email Alert Setup
+
+Two types of alerts are sent automatically:
+- **Failure alert** — sent immediately when any task fails (with error details + log link)
+- **Daily summary** — sent at end of each pipeline run (with audit log table)
+
+### 1. Get a Gmail App Password
+
+> [!IMPORTANT]
+> Do NOT use your regular Gmail password. Gmail requires an **App Password** for SMTP.
+
+1. Go to [Google Account → Security](https://myaccount.google.com/security)
+2. Enable **2-Step Verification** (required)
+3. Go to **App Passwords** → Select app: `Mail` → Select device: `Other`
+4. Copy the 16-character password generated
+
+### 2. Configure `.env`
+
+```bash
+# .env (at project root)
+SMTP_USER=your.email@gmail.com
+SMTP_PASSWORD=xxxx xxxx xxxx xxxx   # 16-char App Password (spaces OK)
+SMTP_MAIL_FROM=your.email@gmail.com
+```
+
+### 3. Verify `docker-compose.yaml` SMTP settings
+
+The Airflow webserver and scheduler use these env vars (already wired in `docker-compose.yaml`):
+
+```yaml
+environment:
+  AIRFLOW__SMTP__SMTP_HOST: smtp.gmail.com
+  AIRFLOW__SMTP__SMTP_PORT: 587
+  AIRFLOW__SMTP__SMTP_STARTTLS: 'true'
+  AIRFLOW__SMTP__SMTP_USER: ${SMTP_USER}
+  AIRFLOW__SMTP__SMTP_PASSWORD: ${SMTP_PASSWORD}
+  AIRFLOW__SMTP__SMTP_MAIL_FROM: ${SMTP_MAIL_FROM}
+```
+
+### 4. Set recipient email
+
+```python
+# src/utils/alerts.py
+RECIPIENT_EMAIL = "your.email@gmail.com"  # Change this to your email
+```
+
+### 5. Restart and test
+
+```bash
+# Apply new .env values
+docker-compose down && docker-compose up -d
+
+# Test alert manually via Airflow UI
+# Go to http://localhost:8080 → DAGs → test_email_alert_dag → Trigger
+```
+
+### Alert Examples
+
+**Failure alert** (triggered on any task error):
+```
+Subject: ❌ DAG Failed: daily_performance_pipeline.transform_students_silver
+Body:    Task, execution date, error traceback, link to Airflow logs
+```
+
+**Daily summary** (triggered at end of pipeline):
+```
+Subject: ✅ Pipeline Summary: daily_performance_pipeline - 2026-04-29
+Body:    Table of last 10 processed files with status and timestamps
+```
 
 ---
 
