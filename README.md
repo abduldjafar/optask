@@ -40,9 +40,9 @@ flowchart TD
         end
 
         subgraph Silver["⚪ Silver Layer (Delta Lake)"]
-            S1["dim_students"]
-            S2["dim_attendance"]
-            S3["dim_assessments"]
+            S1["students (dim)"]
+            S2["attendance (events)"]
+            S3["assessments (events)"]
             S4["fact_student_performance"]
             S5["fact_class_summary"]
             S6["fact_daily_attendance"]
@@ -75,7 +75,7 @@ flowchart TD
 
 ```mermaid
 erDiagram
-    %% Dimension Tables (Silver)
+    %% Dimension Table (Silver)
     STUDENTS {
         string student_id PK
         string student_name
@@ -85,6 +85,7 @@ erDiagram
         datetime updated_at
     }
 
+    %% Base Event Tables (Silver) — cleaned & deduplicated, not aggregated
     ATTENDANCE {
         string attendance_id PK
         string student_id FK
@@ -102,7 +103,7 @@ erDiagram
         date assessment_date
     }
 
-    %% Fact Tables (Silver)
+    %% Aggregate Fact Tables (Silver)
     FACT_STUDENT_PERFORMANCE {
         string student_id PK
         string class_id FK
@@ -171,15 +172,127 @@ erDiagram
 ```
 
 **Layer Description:**
-- **Bronze:** Raw data ingestion (Parquet files)
-- **Silver:** Cleaned dimensions + fact tables (Delta Lake)
-  - **Dimensions:** Students, Attendance, Assessments (deduplicated, type-casted)
-  - **Facts:** Pre-aggregated metrics per student/class/day
-- **Gold:** Business-ready aggregations (class daily performance)
+- **Bronze:** Raw data ingestion, as-is from source (Parquet)
+- **Silver:** Cleaned & typed data (Delta Lake)
+  - **Dimension:** `students` — master data, SCD Type 1 (keep latest)
+  - **Events:** `attendance`, `assessments` — cleaned transactional records, deduplicated by PK
+  - **Aggregate Facts:** `fact_student_performance`, `fact_class_summary` — rolled-up per student/class
+  - **Daily Facts:** `fact_daily_attendance`, `fact_daily_assessment` — rolled-up per class × date
+- **Gold:** Business-ready output (`class_daily_performance`) built by joining Silver facts
+
+---
+
+## 🏛️ Design Decisions
+
+### Why Medallion Architecture (Bronze → Silver → Gold)?
+
+| Alternative | Problem | Our Choice |
+|---|---|---|
+| Single table | No lineage, hard to debug | 3-layer separation |
+| ELT only | No reusability | Transformations persisted at each layer |
+| Overwrite-on-load | Data loss on error | Append + upsert, raw always preserved |
+
+**Bronze** = exact copy of source (never modified). **Silver** = cleaned, typed, deduplicated. **Gold** = pre-aggregated for specific business questions. This separation means: if a bug is found in a transformation, we can re-run from Bronze without re-ingesting.
+
+---
+
+### Why Delta Lake instead of plain Parquet?
+
+Plain Parquet has no ACID guarantees — concurrent writes can corrupt the table. Delta Lake gives us:
+
+- **ACID transactions** — safe concurrent writes from multiple Airflow tasks
+- **Schema evolution** — add columns without breaking existing queries
+- **Time travel** — `DeltaTable.restore()` if bad data is written
+- **Upsert (MERGE)** — idempotent runs without duplicate rows
+
+```python
+# ACID upsert in one call — impossible with plain Parquet
+dt.merge(source, predicate="source.id = target.id") \
+  .when_matched_update_all() \
+  .when_not_matched_insert_all() \
+  .execute()
+```
+
+---
+
+### Why Config-Driven Design?
+
+Early version had one function per table (~100 lines each). Adding a new table meant copy-pasting 100 lines and adapting manually — error-prone and hard to maintain.
+
+Config-driven approach means the **logic is written once** in a generic processor, and tables are added by registering a dictionary:
+
+```
+Before: 1 new table = 100+ lines of code, 1-2 hours work
+After:  1 new table = ~15 lines of config, 5 minutes work
+```
+
+Every table automatically gets: incremental processing, data quality checks, audit logging, metrics, and retry — at zero extra code cost.
+
+---
+
+### Why Polars instead of Pandas or Spark?
+
+| Library | When to use | Problem for us |
+|---|---|---|
+| Pandas | Small data (<1GB) | Too slow, high memory |
+| Spark | Distributed (>100GB) | Heavy infrastructure, overkill |
+| **Polars** | **Single-node, medium data** | ✅ Best fit |
+
+Polars uses Apache Arrow memory format and lazy evaluation. For our dataset size (thousands to millions of rows), it's **5-10x faster than Pandas** and runs on a single Docker container — no cluster needed.
+
+---
+
+### Why Separate Daily-Grain Fact Tables?
+
+The Gold table `class_daily_performance` requires data at **class × date** grain. Initially Gold read directly from Silver dimension tables, which meant:
+- Gold had to re-do all joins and aggregations from scratch
+- Any change in Silver required understanding Gold's complex join logic
+
+By introducing `fact_daily_attendance` and `fact_daily_assessment` in Silver:
+
+```
+Before: Gold joins raw dim tables → complex, coupled
+After:  Gold joins pre-aggregated fact tables → simple, decoupled
+```
+
+Gold becomes a **thin join layer** on top of pre-computed Silver facts — easier to test and extend.
+
+---
+
+### Why Per-Task Parquet Audit Logs instead of a Shared Delta Table?
+
+First implementation wrote all audit logs to a single shared Delta table. Under concurrent Airflow task execution, **multiple tasks writing simultaneously caused merge conflicts and data corruption**.
+
+Solution: each task writes its own timestamped Parquet file:
+
+```
+s3://datalake/system/audit_log/
+  └── students_bronze_to_silver_20240115_100523.parquet
+  └── attendance_bronze_to_silver_20240115_100524.parquet  ← parallel, no conflict
+  └── assessments_bronze_to_silver_20240115_100525.parquet
+```
+
+Reads use glob patterns to aggregate across all files — **zero conflicts, full concurrency**.
+
+---
+
+### Why ClickHouse for Analytics?
+
+ClickHouse uses a columnar storage engine optimized for aggregation queries. The `deltaLake()` table function reads Delta tables directly from MinIO without ETL:
+
+```sql
+-- Query 100M rows in seconds
+SELECT class_id, AVG(attendance_rate)
+FROM deltaLake('http://minio:9000/datalake/gold/class_daily_performance', ...)
+GROUP BY class_id
+```
+
+No separate ETL pipeline needed to load data into ClickHouse — the Delta Lake files in MinIO **are** the source of truth.
 
 ---
 
 ## 🚀 Quick Start
+
 
 ### 1. Prerequisites
 
