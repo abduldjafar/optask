@@ -331,52 +331,119 @@ No separate ETL pipeline needed to load data into ClickHouse — the Delta Lake 
 
 ---
 
-## 🚀 Quick Start
-
+## 🚀 Cara Menjalankan (Quick Start)
 
 ### 1. Prerequisites
 
-- Docker & Docker Compose
-- Python 3.9+
+```bash
+# Required
+- Docker & Docker Compose v2+
+- Git
 
-### 2. Start Infrastructure
+# Verify
+docker --version        # Docker version 24+
+docker compose version  # v2.0+
+```
+
+### 2. Clone & Setup
 
 ```bash
-# Start all services
+# Clone repository
+git clone <repo-url>
+cd onlinepajak
+
+# Copy environment config
+cp .env.example .env    # or edit .env directly
+
+# Edit .env with your credentials
+# SMTP_USER=your.email@gmail.com
+# SMTP_PASSWORD=your-app-password
+```
+
+### 3. Start Infrastructure
+
+```bash
+# Start all services (Airflow + MinIO + ClickHouse)
 docker-compose up -d
 
-# Services:
-# - Airflow: http://localhost:8080 (admin/admin)
-# - ClickHouse HTTP: http://localhost:8123
-# - ClickHouse Web UI: http://localhost:8123/play
-# - MinIO: http://localhost:9000
+# Wait ~30 seconds for Airflow to initialize, then verify:
+docker-compose ps
 ```
 
-### 3. Trigger Pipeline
+| Service | URL | Credentials |
+|---|---|---|
+| Airflow UI | http://localhost:8080 | `airflow` / `airflow` |
+| MinIO Console | http://localhost:9001 | `minioadmin` / `minioadmin` |
+| ClickHouse Play | http://localhost:8123/play | — |
 
-**Automatic schedule:**
-| DAG | Schedule | Time (UTC) | Time (WIB) |
-|---|---|---|---|
-| `raw_ingestion_pipeline` | `0 1 * * *` | 01:00 | 08:00 |
-| `daily_performance_pipeline` | `0 5 * * *` | 05:00 | 12:00 |
+### 4. Prepare Raw Data
 
-**Manual trigger:**
-**Option A: Airflow UI**
+```bash
+# Raw data files should be in:
+# raw_data/students/YYYY-MM-DD.csv
+# raw_data/attendance/YYYY-MM-DD.csv
+# raw_data/assessments/YYYY-MM-DD.json
+
+# Example — check existing data:
+ls raw_data/students/
+ls raw_data/attendance/
+ls raw_data/assessments/
+```
+
+### 5. Run the Pipeline
+
+**Option A: Airflow UI (recommended)**
 ```
 1. Open http://localhost:8080
-2. Enable DAG: raw_ingestion_pipeline
-3. Enable DAG: daily_performance_pipeline
-4. Trigger manually or wait for schedule
+2. Login: airflow / airflow
+3. Enable DAG: raw_ingestion_pipeline  → click ▶ to trigger
+4. Wait for completion (check status: all green ✅)
+5. Enable DAG: daily_performance_pipeline → click ▶ to trigger
+6. Monitor each task in the Graph view
 ```
 
 **Option B: Command Line**
 ```bash
-# Trigger raw ingestion
+# Step 1: Ingest raw files to MinIO
 docker exec -it airflow-scheduler airflow dags trigger raw_ingestion_pipeline
 
-# Trigger main pipeline
+# Step 2: Run Bronze → Silver → Gold pipeline
 docker exec -it airflow-scheduler airflow dags trigger daily_performance_pipeline
+
+# Monitor status
+docker exec -it airflow-scheduler airflow dags list-runs -d raw_ingestion_pipeline
 ```
+
+### 6. Verify Results
+
+```bash
+# Check data in MinIO
+# Open http://localhost:9001 → Browse datalake bucket
+# Should see: raw/, bronze/, silver/, gold/ directories
+
+# Query Gold table in ClickHouse
+docker exec -it clickhouse-server clickhouse-client
+```
+
+```sql
+-- Verify gold table has data
+SELECT class_id, date, attendance_rate, avg_score
+FROM deltaLake('http://minio:9000/datalake/gold/class_daily_performance',
+               'minioadmin', 'minioadmin')
+ORDER BY date DESC
+LIMIT 10;
+```
+
+### 7. Automatic Daily Schedule
+
+After first manual run, subsequent runs are fully automatic:
+
+| DAG | Cron | Time (UTC) | Time (WIB) |
+|---|---|---|---|
+| `raw_ingestion_pipeline` | `0 1 * * *` | 01:00 | 08:00 |
+| `daily_performance_pipeline` | `0 5 * * *` | 05:00 | 12:00 |
+
+> Only NEW files added to `raw_data/` will be processed — existing data is not reprocessed.
 
 ### 4. Query Data with ClickHouse
 
