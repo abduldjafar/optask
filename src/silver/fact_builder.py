@@ -11,6 +11,36 @@ from silver.fact_config import FactTableConfig
 logger = logging.getLogger(__name__)
 
 
+def _filter_by_date(df: pl.DataFrame, date_col: str, cutoff_date: date) -> pl.DataFrame:
+    """
+    Helper function to filter DataFrame by date column.
+    Handles different column types (Date, Datetime, String).
+
+    Args:
+        df: DataFrame to filter
+        date_col: Name of date column
+        cutoff_date: Cutoff date (keep rows > this date)
+
+    Returns:
+        Filtered DataFrame
+    """
+    if date_col not in df.columns:
+        return df
+
+    col_dtype = df[date_col].dtype
+
+    if col_dtype == pl.Date:
+        return df.filter(pl.col(date_col) > cutoff_date)
+    elif col_dtype == pl.Datetime:
+        return df.filter(pl.col(date_col).cast(pl.Date) > cutoff_date)
+    elif col_dtype == pl.Utf8:
+        # Handle string with potential time component
+        return df.filter(pl.col(date_col).str.to_datetime().cast(pl.Date) > cutoff_date)
+    else:
+        logger.warning(f"Unexpected type {col_dtype} for {date_col}, attempting cast")
+        return df.filter(pl.col(date_col).cast(pl.Date) > cutoff_date)
+
+
 def build_fact_table_generic(config: FactTableConfig, snapshot_date: Optional[str] = None, incremental: bool = False):
     """
     Generic fact table builder that works from configuration.
@@ -37,6 +67,7 @@ def build_fact_table_generic(config: FactTableConfig, snapshot_date: Optional[st
 
             # Apply incremental filter if enabled and date_column configured
             incremental_applied = False
+            cutoff_date_obj = None
             if incremental and config.date_column:
                 last_success_date = get_last_successful_date(config.table_name, "silver_fact")
                 if last_success_date:
@@ -47,18 +78,8 @@ def build_fact_table_generic(config: FactTableConfig, snapshot_date: Optional[st
                             cutoff_date_obj = cutoff_date.date()
                             before_count = len(df)
 
-                            # Handle different column types
-                            col_dtype = df[date_col].dtype
-
-                            if col_dtype == pl.Date:
-                                df = df.filter(pl.col(date_col) > cutoff_date_obj)
-                            elif col_dtype == pl.Datetime:
-                                df = df.filter(pl.col(date_col).cast(pl.Date) > cutoff_date_obj)
-                            elif col_dtype == pl.Utf8:
-                                df = df.filter(pl.col(date_col).str.to_date() > cutoff_date_obj)
-                            else:
-                                df = df.filter(pl.col(date_col).cast(pl.Date) > cutoff_date_obj)
-
+                            # Use helper function for filtering
+                            df = _filter_by_date(df, date_col, cutoff_date_obj)
                             after_count = len(df)
 
                             # Check if incremental filter resulted in 0 rows
@@ -79,6 +100,7 @@ def build_fact_table_generic(config: FactTableConfig, snapshot_date: Optional[st
                         except Exception as e:
                             logger.warning(f"Incremental filter failed: {str(e)}, using full refresh")
                             df = read_delta_safe(config.primary_table)
+                            cutoff_date_obj = None  # Reset cutoff for join tables
                             metrics.add("incremental_fallback", True)
 
             if not incremental_applied:
@@ -88,6 +110,24 @@ def build_fact_table_generic(config: FactTableConfig, snapshot_date: Optional[st
             if config.joins:
                 for idx, join_spec in enumerate(config.joins, 1):
                     join_df = read_delta_safe(join_spec.source_table)
+                    join_before_count = len(join_df)
+
+                    # Apply incremental filter to join table if cutoff_date is set
+                    # Try common date columns: attendance_date, assessment_date, created_at, updated_at
+                    if cutoff_date_obj is not None and incremental_applied:
+                        date_cols_to_try = ['attendance_date', 'assessment_date', 'created_at', 'updated_at', 'date']
+                        filtered = False
+                        for date_col in date_cols_to_try:
+                            if date_col in join_df.columns:
+                                join_df = _filter_by_date(join_df, date_col, cutoff_date_obj)
+                                join_after_count = len(join_df)
+                                if join_after_count < join_before_count:
+                                    logger.info(f"Join table {idx} incremental: {join_before_count:,} → {join_after_count:,} rows")
+                                    metrics.add(f"join_{idx}_incremental_filtered", join_before_count - join_after_count)
+                                    filtered = True
+                                break
+                        if not filtered:
+                            metrics.add(f"join_{idx}_no_date_column", True)
 
                     # Apply pre-aggregation if specified
                     if join_spec.pre_aggregate:
@@ -144,11 +184,11 @@ def build_fact_table_generic(config: FactTableConfig, snapshot_date: Optional[st
             if config.mode == "upsert" or incremental:
                 # Upsert mode: merge based on primary keys + snapshot_date
                 upsert_keys = config.primary_keys + ["snapshot_date"]
-                upsert_delta_safe(df, target_path, primary_keys=upsert_keys)
+                upsert_delta_safe(df, target_path, primary_keys=upsert_keys, partition_by=config.partition_by)
                 metrics.add("write_mode", "upsert")
             else:
                 # Other modes: overwrite, append
-                write_delta_safe(df, target_path, mode=config.mode)
+                write_delta_safe(df, target_path, mode=config.mode, partition_by=config.partition_by)
                 metrics.add("write_mode", config.mode)
 
             log_execution(

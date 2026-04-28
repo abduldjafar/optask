@@ -276,6 +276,28 @@ Reads use glob patterns to aggregate across all files — **zero conflicts, full
 
 ---
 
+### Why `ingestion_date` instead of only `updated_at` for Silver incremental?
+
+Source data often has historical or stale domain dates. For example, `students.csv` exported daily has `updated_at = 2025-01-01` for every row even though a new student was added today. A filter on `updated_at > last_run` would silently miss these new records.
+
+Solution: Bronze stamps every record with `ingestion_date` = date extracted from the filename:
+
+```python
+# Bronze: 2026-04-29.parquet → ingestion_date = 2026-04-29
+df = df.with_columns(pl.lit("2026-04-29").str.to_date().alias("ingestion_date"))
+```
+
+Silver then uses a compound OR filter:
+```
+ingestion_date > cutoff  →  catches new files (even with old updated_at)
+   OR
+updated_at > cutoff      →  catches records genuinely updated in source system
+```
+
+**Result:** No records are silently skipped, regardless of source date quality.
+
+---
+
 ### Why ClickHouse for Analytics?
 
 ClickHouse uses a columnar storage engine optimized for aggregation queries. The `deltaLake()` table function reads Delta tables directly from MinIO without ETL:
@@ -314,6 +336,13 @@ docker-compose up -d
 
 ### 3. Trigger Pipeline
 
+**Automatic schedule:**
+| DAG | Schedule | Time (UTC) | Time (WIB) |
+|---|---|---|---|
+| `raw_ingestion_pipeline` | `0 1 * * *` | 01:00 | 08:00 |
+| `daily_performance_pipeline` | `0 5 * * *` | 05:00 | 12:00 |
+
+**Manual trigger:**
 **Option A: Airflow UI**
 ```
 1. Open http://localhost:8080
@@ -405,23 +434,39 @@ SILVER_DIM_TABLES["courses"] = {
 
 ### ⚡ Incremental Processing
 
-Process only new data since last successful run.
+Every layer processes only new data — no reprocessing of already-ingested records.
 
-**How it works:**
-```python
-# Automatic in generic processor
-last_success_date = get_last_successful_date("students", "bronze_to_silver")
-df = df.filter(pl.col("updated_at") > last_success_date)
+**Layer-by-layer strategy:**
+
+| Layer | Strategy | Tracking |
+|---|---|---|
+| Raw → MinIO | Loop all unprocessed local files | Audit log `local_to_raw` |
+| MinIO → Bronze | Loop all unprocessed S3 files | Audit log `raw_to_bronze` |
+| Bronze → Silver | Compound date filter | Audit log `bronze_to_silver` |
+| Silver → Gold | Date filter on fact tables | Audit log `silver_to_gold` |
+
+**How Raw/Bronze file tracking works:**
 ```
+Available: [04-27.parquet, 04-28.parquet, 04-29.parquet]
+Last success (audit log): 04-28.parquet
+Next to process: 04-29.parquet
+```
+On first run (empty table): all files backfilled automatically.
 
-**Benefits:**
-- **20x faster** - process MBs instead of GBs
-- **95% cost savings** - less compute, less storage I/O
-- **Always current** - runs every hour on new data only
+**How Silver incremental works — compound OR filter:**
+```python
+# ingestion_date = date extracted from Bronze filename (e.g. 2026-04-29)
+# Catches both new files AND records updated in source system
+conditions = [
+    pl.col("ingestion_date") > cutoff_date,  # new file arrived
+    pl.col("updated_at") > cutoff_date,       # record changed in source
+]
+df = df.filter(conditions[0] | conditions[1])
+```
+This handles the case where source records have historical `updated_at` dates — a new file still gets picked up via `ingestion_date`.
 
 **Manual override:**
 ```python
-# Force full refresh
 process_dim_to_silver("students", incremental=False, full_refresh=True)
 ```
 

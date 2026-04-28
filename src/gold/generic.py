@@ -13,6 +13,36 @@ from gold.config import GOLD_TABLES, GoldTableConfig
 logger = logging.getLogger(__name__)
 
 
+def _filter_by_date(df: pl.DataFrame, date_col: str, cutoff_date) -> pl.DataFrame:
+    """
+    Helper function to filter DataFrame by date column.
+    Handles different column types (Date, Datetime, String).
+
+    Args:
+        df: DataFrame to filter
+        date_col: Name of date column
+        cutoff_date: Cutoff date (keep rows > this date)
+
+    Returns:
+        Filtered DataFrame
+    """
+    if date_col not in df.columns:
+        return df
+
+    col_dtype = df[date_col].dtype
+
+    if col_dtype == pl.Date:
+        return df.filter(pl.col(date_col) > cutoff_date)
+    elif col_dtype == pl.Datetime:
+        return df.filter(pl.col(date_col).cast(pl.Date) > cutoff_date)
+    elif col_dtype == pl.Utf8:
+        # Handle string with potential time component
+        return df.filter(pl.col(date_col).str.to_datetime().cast(pl.Date) > cutoff_date)
+    else:
+        logger.warning(f"Unexpected type {col_dtype} for {date_col}, attempting cast")
+        return df.filter(pl.col(date_col).cast(pl.Date) > cutoff_date)
+
+
 def process_gold_table(table_name: str, incremental: bool = True, full_refresh: bool = False):
     """
     Generic function to build a gold aggregation table from config.
@@ -57,11 +87,12 @@ def process_gold_table(table_name: str, incremental: bool = True, full_refresh: 
                         cutoff_date = (datetime.strptime(last_success_date, "%Y-%m-%d") - timedelta(days=1)).date()
 
                         # Filter all source tables that have the date column
+                        # Use helper function to handle different column types
                         filtered_any = False
                         for alias, df in source_dfs.items():
                             if config.date_column in df.columns:
                                 before_count = len(df)
-                                df_filtered = df.filter(pl.col(config.date_column) > cutoff_date)
+                                df_filtered = _filter_by_date(df, config.date_column, cutoff_date)
                                 after_count = len(df_filtered)
 
                                 source_dfs[alias] = df_filtered
@@ -136,10 +167,10 @@ def process_gold_table(table_name: str, incremental: bool = True, full_refresh: 
             target_path = f"s3://datalake/gold/{table_name}"
 
             if incremental and not full_refresh and config.primary_keys:
-                upsert_delta_safe(result_df, target_path, primary_keys=config.primary_keys)
+                upsert_delta_safe(result_df, target_path, primary_keys=config.primary_keys, partition_by=config.partition_by)
                 write_mode = "upsert"
             else:
-                write_delta_safe(result_df, target_path, mode="overwrite")
+                write_delta_safe(result_df, target_path, mode="overwrite", partition_by=config.partition_by)
                 write_mode = "overwrite"
 
             metrics.add("write_mode", write_mode)

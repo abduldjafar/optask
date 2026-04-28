@@ -89,7 +89,8 @@ class FactTableConfig:
         filters: Optional[List[Callable[[pl.DataFrame], pl.DataFrame]]] = None,
         post_process: Optional[Callable[[pl.DataFrame], pl.DataFrame]] = None,
         mode: str = "overwrite",
-        date_column: Optional[str] = None
+        date_column: Optional[str] = None,
+        partition_by: Optional[List[str]] = None
     ):
         """
         Args:
@@ -103,6 +104,7 @@ class FactTableConfig:
             post_process: Function to apply final transformations
             mode: Write mode - "overwrite", "append", or "upsert"
             date_column: Column for incremental filtering (optional)
+            partition_by: Columns to partition by (e.g., ["date"] for daily facts)
         """
         self.table_name = table_name
         self.primary_table = primary_table
@@ -114,6 +116,7 @@ class FactTableConfig:
         self.post_process = post_process
         self.mode = mode
         self.date_column = date_column
+        self.partition_by = partition_by
 
 
 # Configuration for all fact tables
@@ -152,7 +155,8 @@ SILVER_FACT_TABLES: Dict[str, FactTableConfig] = {
                 ]
             )
         ],
-        mode="upsert"
+        mode="upsert",
+        partition_by=["snapshot_date"]  # Partition by snapshot date
     ),
 
     "fact_class_summary": FactTableConfig(
@@ -181,7 +185,8 @@ SILVER_FACT_TABLES: Dict[str, FactTableConfig] = {
             AggregationRule("grade_level", "first", "grade_level"),
             AggregationRule("active_students", "first", "active_students"),  # Pass through from join
         ],
-        mode="upsert"
+        mode="upsert",
+        partition_by=["snapshot_date"]  # Partition by snapshot date
     ),
 
     "fact_daily_attendance": FactTableConfig(
@@ -207,7 +212,8 @@ SILVER_FACT_TABLES: Dict[str, FactTableConfig] = {
                             expr=lambda: (pl.col("status") == "ABSENT").sum()),
         ],
         post_process=lambda df: df.rename({"attendance_date": "date"}),
-        mode="upsert"
+        mode="upsert",
+        partition_by=["date"]  # Partition by date (after rename in post_process)
     ),
 
     "fact_daily_assessment": FactTableConfig(
@@ -232,6 +238,7 @@ SILVER_FACT_TABLES: Dict[str, FactTableConfig] = {
             AggregationRule("score", "mean", "avg_score"),
         ],
         post_process=lambda df: df.rename({"assessment_date": "date"}),
-        mode="upsert"
+        mode="upsert",
+        partition_by=["date"]  # Partition by date (after rename in post_process)
     ),
 }

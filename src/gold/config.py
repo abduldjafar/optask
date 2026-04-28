@@ -17,7 +17,8 @@ class GoldTableConfig:
         date_column: Optional[str] = None,  # Column for incremental filtering
         primary_keys: Optional[List[str]] = None,  # For upsert mode
         select_columns: Optional[List[str]] = None,  # Final columns to select
-        transformations: Optional[List] = None  # Additional transformations
+        transformations: Optional[List] = None,  # Additional transformations
+        partition_by: Optional[List[str]] = None  # Partition columns
     ):
         """
         Args:
@@ -28,6 +29,7 @@ class GoldTableConfig:
             primary_keys: Composite key for upsert (usually includes date)
             select_columns: Final columns in output (None = all)
             transformations: Additional column transformations
+            partition_by: Columns to partition by (e.g., ["date"])
         """
         self.table_name = table_name
         self.source_tables = source_tables
@@ -36,6 +38,7 @@ class GoldTableConfig:
         self.primary_keys = primary_keys or []
         self.select_columns = select_columns
         self.transformations = transformations or []
+        self.partition_by = partition_by
 
 
 # Configuration for all gold tables
@@ -107,6 +110,9 @@ GOLD_TABLES: Dict[str, GoldTableConfig] = {
              (pl.col("present_count").fill_null(0) /
               pl.col("students_with_attendance").fill_null(1)  # avoid div-by-zero → 0/1=0
              ).fill_nan(0.0))
-        ]
+        ],
+
+        # Partition by date for query performance
+        partition_by=["date"]
     )
 }

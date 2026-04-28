@@ -51,6 +51,9 @@ def process_dim_to_silver(table_name: str, incremental: bool = True, full_refres
 
             # Cast columns to schema
             select_exprs = [pl.col(name).cast(dtype) for name, dtype in config["columns"].items()]
+            # Always pass through ingestion_date if present (added by Bronze, used for incremental)
+            if "ingestion_date" in df.columns:
+                select_exprs.append(pl.col("ingestion_date").cast(pl.Date))
             df = df.select(select_exprs)
             metrics.add("columns_casted", len(config['columns']))
 
@@ -69,34 +72,40 @@ def process_dim_to_silver(table_name: str, incremental: bool = True, full_refres
                                 date_col = col_name
                                 break
 
-                    if date_col:
+                    if date_col or "ingestion_date" in df.columns:
                         try:
-                            # Filter for records updated/created after last successful run
-                            # Add 1 day buffer to catch any late-arriving data
                             cutoff_date = datetime.strptime(last_success_date, "%Y-%m-%d") - timedelta(days=1)
+                            # Compound filter: ingestion_date OR domain date column > cutoff
+                            # This captures:
+                            #   1. Records from new files (ingestion_date is new)
+                            #   2. Records actually updated in the source (date_col is new)
+                            conditions = []
+
+                            if "ingestion_date" in df.columns:
+                                conditions.append(pl.col("ingestion_date") > cutoff_date.date())
+
+                            if date_col and date_col in df.columns:
+                                col_dtype = df[date_col].dtype
+                                if col_dtype == pl.Date:
+                                    conditions.append(pl.col(date_col) > cutoff_date.date())
+                                elif col_dtype == pl.Datetime:
+                                    conditions.append(pl.col(date_col).cast(pl.Date) > cutoff_date.date())
+                                elif col_dtype == pl.Utf8:
+                                    conditions.append(
+                                        pl.col(date_col).str.to_datetime().cast(pl.Date) > cutoff_date.date()
+                                    )
+                                else:
+                                    logger.warning(f"Unexpected type {col_dtype} for {date_col}, skipping domain date filter")
+
                             before_count = len(df)
 
-                            # Handle different column types gracefully
-                            col_dtype = df[date_col].dtype
-
-                            if col_dtype == pl.Date:
-                                # Already Date type, compare directly
-                                df = df.filter(pl.col(date_col) > cutoff_date.date())
-                            elif col_dtype == pl.Datetime:
-                                # Datetime type, cast to Date for comparison
-                                df = df.filter(pl.col(date_col).cast(pl.Date) > cutoff_date.date())
-                            elif col_dtype == pl.Utf8:
-                                # String type, parse datetime first
-                                df = df.filter(
-                                    pl.col(date_col).str.to_datetime().cast(pl.Date) > cutoff_date.date()
-                                )
-                            else:
-                                # Unknown type, try generic cast
-                                logger.warning(f"  ⚠️  Unexpected type {col_dtype} for {date_col}, attempting cast")
-                                df = df.filter(pl.col(date_col).cast(pl.Date) > cutoff_date.date())
+                            if conditions:
+                                combined_filter = conditions[0]
+                                for c in conditions[1:]:
+                                    combined_filter = combined_filter | c
+                                df = df.filter(combined_filter)
 
                             after_count = len(df)
-                            filtered_count = before_count - after_count
 
                             # Check if incremental filter resulted in 0 rows (no new data)
                             if after_count == 0:
@@ -110,7 +119,7 @@ def process_dim_to_silver(table_name: str, incremental: bool = True, full_refres
                                 return
                             else:
                                 logger.info(f"Incremental: {before_count:,} → {after_count:,} rows (after {last_success_date})")
-                                metrics.add("incremental_filtered", filtered_count)
+                                metrics.add("incremental_filtered", before_count - after_count)
                                 metrics.add("incremental_mode", True)
                                 metrics.add("incremental_cutoff_date", str(cutoff_date.date()))
                                 incremental_applied = True
@@ -164,13 +173,14 @@ def process_dim_to_silver(table_name: str, incremental: bool = True, full_refres
 
             # Write to Silver
             target_path = f"s3://datalake/silver/{table_name}"
+            partition_by = config.get("partition_by")
 
             if incremental and not full_refresh and config.get("dedup_keys"):
                 from utils.storage import upsert_delta_safe
-                upsert_delta_safe(df, target_path, primary_keys=config["dedup_keys"])
+                upsert_delta_safe(df, target_path, primary_keys=config["dedup_keys"], partition_by=partition_by)
                 write_mode = "upsert"
             else:
-                write_delta_safe(df, target_path, mode="overwrite")
+                write_delta_safe(df, target_path, mode="overwrite", partition_by=partition_by)
                 write_mode = "overwrite"
 
             metrics.add("write_mode", write_mode)

@@ -30,7 +30,8 @@ SILVER_DIM_TABLES = {
         "date_column": "created_at",  # Column for incremental filtering
         "dedup_keys": ["attendance_id"],
         "dedup_sort_col": "created_at",
-        "not_null_cols": ["student_id", "attendance_date", "status"]
+        "not_null_cols": ["student_id", "attendance_date", "status"],
+        "partition_by": ["attendance_date"]  # Partition by date for query performance
     },
     "assessments": {
         "source_table": "s3://datalake/bronze/assessments",
@@ -46,6 +47,7 @@ SILVER_DIM_TABLES = {
         "date_column": "created_at",  # Column for incremental filtering
         "dedup_keys": ["assessment_id"],
         "dedup_sort_col": "created_at",
-        "not_null_cols": ["student_id", "assessment_date", "score"]
+        "not_null_cols": ["student_id", "assessment_date", "score"],
+        "partition_by": ["assessment_date"]  # Partition by date for query performance
     }
 }

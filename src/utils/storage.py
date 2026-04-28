@@ -62,9 +62,15 @@ def read_parquet_safe(path: str) -> pl.DataFrame:
     dataset = ds.dataset(path_no_s3, format="parquet", filesystem=fs)
     return pl.scan_pyarrow_dataset(dataset).collect()
 
-def write_delta_safe(df: pl.DataFrame, path: str, mode: str = "overwrite"):
+def write_delta_safe(df: pl.DataFrame, path: str, mode: str = "overwrite", partition_by: list = None):
     """
     Writes a Polars DataFrame to a Delta table in S3/MinIO.
+
+    Args:
+        df: DataFrame to write
+        path: S3 path to Delta table
+        mode: Write mode ("overwrite", "append")
+        partition_by: Optional list of columns to partition by (e.g., ["date"])
     """
     try:
         write_deltalake(
@@ -72,6 +78,7 @@ def write_delta_safe(df: pl.DataFrame, path: str, mode: str = "overwrite"):
             df.to_arrow(),
             mode=mode,
             storage_options=STORAGE_OPTIONS,
+            partition_by=partition_by
         )
     except Exception as e:
         error_msg = str(e).lower()
@@ -84,33 +91,40 @@ def write_delta_safe(df: pl.DataFrame, path: str, mode: str = "overwrite"):
                 df.to_arrow(),
                 mode="overwrite",
                 overwrite_schema=True,
-                storage_options=STORAGE_OPTIONS
+                storage_options=STORAGE_OPTIONS,
+                partition_by=partition_by
             )
         else:
             raise e
 
-def upsert_delta_safe(df: pl.DataFrame, path: str, primary_keys: list):
+def upsert_delta_safe(df: pl.DataFrame, path: str, primary_keys: list, partition_by: list = None):
     """
     Upserts a Polars DataFrame into an existing Delta table based on primary keys.
     If the table does not exist, it falls back to creating it.
+
+    Args:
+        df: DataFrame to upsert
+        path: S3 path to Delta table
+        primary_keys: List of columns forming the composite key for upsert
+        partition_by: Optional list of columns to partition by (e.g., ["date"])
     """
     try:
         dt = DeltaTable(path, storage_options=STORAGE_OPTIONS)
-        
+
         # Build merge predicate: e.g., "source.id = target.id AND source.date = target.date"
         predicate = " AND ".join([f"source.{k} = target.{k}" for k in primary_keys])
-        
+
         dt.merge(
             source=df.to_arrow(),
             predicate=predicate,
             source_alias="source",
             target_alias="target"
         ).when_matched_update_all().when_not_matched_insert_all().execute()
-        
+
     except Exception as e:
         error_msg = str(e).lower()
         if "no table version found" in error_msg or "not a delta table" in error_msg or "no log files" in error_msg or "deltatable" in error_msg:
-            print(f"Table at {path} does not exist, creating initially.")
-            write_delta_safe(df, path, mode="overwrite")
+            print(f"Table at {path} does not exist, creating initially with partitioning.")
+            write_delta_safe(df, path, mode="overwrite", partition_by=partition_by)
         else:
             raise e

@@ -145,9 +145,18 @@ def get_next_file(table_name: str, base_path: str) -> str:
         if logs_df.is_empty():
             return available_files[0]
         
-        # Filter for this table and get the latest execution by file date
-        table_logs = logs_df.filter(pl.col("table_name") == table_name).sort("latest_date", descending=True)
-        
+        # Filter for this table AND only the raw ingestion layer
+        # (other layers also log with the same table_name but with file_name="-"
+        #  which would corrupt the "next file" tracking logic)
+        table_logs = (
+            logs_df
+            .filter(
+                (pl.col("table_name") == table_name) &
+                (pl.col("layer_type") == "local_to_raw")
+            )
+            .sort("latest_date", descending=True)
+        )
+
         if len(table_logs) == 0:
             return available_files[0]
             
@@ -180,3 +189,94 @@ def get_next_file(table_name: str, base_path: str) -> str:
     except Exception:
         # Log directory doesn't exist yet, meaning this is the first run
         return available_files[0]
+
+
+def get_next_s3_file_for_bronze(table_name: str, s3_dir: str) -> tuple:
+    """
+    Lists parquet files in an S3/MinIO directory and returns the next file
+    that hasn't been successfully ingested to Bronze yet.
+
+    Uses the same sequential file-tracking pattern as get_next_file(),
+    but operates on S3 instead of local filesystem.
+
+    Args:
+        table_name: Name of the table (e.g., "students")
+        s3_dir: S3 directory path (e.g., "s3://datalake/raw/students")
+
+    Returns:
+        Tuple of (filename, full_s3_path) or (None, None) if up to date.
+    """
+    import re
+    import pyarrow.fs as pafs
+    from utils.storage import get_pyarrow_fs
+
+    # List files in S3 directory
+    fs = get_pyarrow_fs()
+    path_no_s3 = s3_dir.replace("s3://", "")
+
+    try:
+        file_infos = fs.get_file_info(pafs.FileSelector(path_no_s3, recursive=False))
+        available_files = [
+            fi.base_name for fi in file_infos
+            if fi.type == pafs.FileType.File
+            and re.match(r"^\d{4}-\d{2}-\d{2}\.parquet$", fi.base_name)
+        ]
+    except Exception as e:
+        print(f"Warning: Could not list S3 files at {s3_dir}: {e}")
+        return None, None
+
+    if not available_files:
+        return None, None
+
+    # Sort by date ascending
+    def date_sort_key(filename):
+        return datetime.strptime(filename.split('.')[0], "%Y-%m-%d")
+
+    available_files = sorted(available_files, key=date_sort_key)
+
+    try:
+        logs_df = read_parquet_safe(f"{LOG_PATH}/*.parquet")
+
+        if logs_df.is_empty():
+            first = available_files[0]
+            return first, f"{s3_dir}/{first}"
+
+        # Only consider successful raw_to_bronze logs for this table
+        success_logs = logs_df.filter(
+            (pl.col("table_name") == table_name) &
+            (pl.col("layer_type") == "raw_to_bronze") &
+            (pl.col("status") == "success")
+        )
+
+        if len(success_logs) == 0:
+            first = available_files[0]
+            return first, f"{s3_dir}/{first}"
+
+        # Find latest successfully processed file
+        processed = [
+            f for f in success_logs["file_name"].to_list()
+            if f != "-" and f in available_files
+        ]
+
+        if not processed:
+            first = available_files[0]
+            return first, f"{s3_dir}/{first}"
+
+        last_processed = sorted(processed, key=date_sort_key)[-1]
+
+        try:
+            idx = available_files.index(last_processed)
+            if idx + 1 < len(available_files):
+                next_file = available_files[idx + 1]
+                return next_file, f"{s3_dir}/{next_file}"
+            else:
+                return None, None  # Already up to date
+        except ValueError:
+            first = available_files[0]
+            return first, f"{s3_dir}/{first}"
+
+    except Exception:
+        # No logs yet → first run
+        first = available_files[0]
+        return first, f"{s3_dir}/{first}"
+

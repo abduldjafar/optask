@@ -12,17 +12,17 @@ from silver.transform import build_fact_student_performance, build_fact_class_su
 DAILY_PIPELINE_TABLES = [
     {
         "table_name": "students",
-        "raw_source_path": "s3://datalake/raw/students/*.parquet",
+        "raw_source_path": "s3://datalake/raw/students",  # directory → incremental per-file
         "silver_callable": process_dim_to_silver
     },
     {
         "table_name": "attendance",
-        "raw_source_path": "s3://datalake/raw/attendance/*.parquet",
+        "raw_source_path": "s3://datalake/raw/attendance",  # directory → incremental per-file
         "silver_callable": process_dim_to_silver
     },
     {
         "table_name": "assessments",
-        "raw_source_path": "s3://datalake/raw/assessments/*.parquet",
+        "raw_source_path": "s3://datalake/raw/assessments",  # directory → incremental per-file
         "silver_callable": process_dim_to_silver
     }
 ]
