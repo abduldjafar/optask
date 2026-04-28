@@ -966,22 +966,31 @@ Body:    Table of last 10 processed files with status and timestamps
 
 ---
 
-## 🙏 Acknowledgments
+## 📚 Daftar Pustaka
 
-Built with:
-- [Delta Lake](https://delta.io/) - ACID transactions for data lakes
-- [Polars](https://pola.rs/) - Lightning-fast DataFrame library
-- [Apache Airflow](https://airflow.apache.org/) - Workflow orchestration
-- [ClickHouse](https://clickhouse.com/) - Fast analytical database
+### Tools & Libraries
 
----
+| No | Nama | Deskripsi | Referensi |
+|---|---|---|---|
+| 1 | Apache Airflow | Platform orkestrasi workflow untuk scheduling & dependency management pipeline | https://airflow.apache.org/ |
+| 2 | Delta Lake | Format storage ACID-compliant di atas Parquet, mendukung upsert dan time travel | https://delta.io/ |
+| 3 | Polars | DataFrame library berbasis Apache Arrow, 5-10x lebih cepat dari Pandas untuk batch processing | https://pola.rs/ |
+| 4 | MinIO | S3-compatible object storage untuk penyimpanan data lokal (Bronze/Silver/Gold layer) | https://min.io/ |
+| 5 | ClickHouse | Columnar OLAP database, mendukung `deltaLake()` function untuk query langsung ke MinIO | https://clickhouse.com/ |
+| 6 | Docker Compose | Container orchestration untuk local development environment | https://docs.docker.com/compose/ |
+| 7 | PyArrow | Apache Arrow Python bindings, bridge antara Polars dan Delta Lake | https://arrow.apache.org/docs/python/ |
+| 8 | delta-rs (Python) | Python binding untuk Delta Lake, digunakan untuk MERGE/upsert operations | https://delta-io.github.io/delta-rs/ |
 
-## 📞 Support
+### Konsep & Referensi Arsitektur
 
-For issues or questions:
-1. Check [Troubleshooting](#-troubleshooting) section
-2. Review [audit logs](#-monitoring--observability)
-3. Check [configuration reference](#-configuration-reference)
+| No | Konsep | Sumber |
+|---|---|---|
+| 1 | Medallion Architecture (Bronze-Silver-Gold) | Databricks. (2023). *Medallion Architecture*. https://www.databricks.com/glossary/medallion-architecture |
+| 2 | Slowly Changing Dimension Type 1 (SCD1) | Kimball, R., & Ross, M. (2013). *The Data Warehouse Toolkit* (3rd ed.). Wiley. |
+| 3 | Fact Table Grain Design | Kimball, R., & Ross, M. (2013). *The Data Warehouse Toolkit* (3rd ed.). Wiley. |
+| 4 | Incremental Data Processing with Delta Lake | Delta Lake. (2024). *Table Streaming Reads and Writes*. https://docs.delta.io/latest/delta-streaming.html |
+| 5 | Apache Airflow Best Practices | Apache Software Foundation. (2024). *Best Practices*. https://airflow.apache.org/docs/apache-airflow/stable/best-practices.html |
+| 6 | Polars vs Pandas Performance | Vink, R. (2023). *Polars: A lightning-fast DataFrame library*. https://pola.rs/posts/polars-is-fast |
 
 ---
 
