@@ -31,7 +31,7 @@ with DAG(
     'daily_performance_pipeline',
     default_args=default_args,
     description='End-to-end scalable data pipeline for class daily performance',
-    schedule_interval='0 3 * * *',  # Every day at 03:00 UTC (10:00 WIB), after raw ingestion
+    schedule_interval='0 5 * * *',  # Every day at 05:00 UTC (12:00 WIB), after raw ingestion
     start_date=datetime(2025, 1, 1),
     catchup=False,
     tags=['analytics', 'performance'],

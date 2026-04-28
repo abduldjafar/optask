@@ -14,18 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def _filter_by_date(df: pl.DataFrame, date_col: str, cutoff_date) -> pl.DataFrame:
-    """
-    Helper function to filter DataFrame by date column.
-    Handles different column types (Date, Datetime, String).
-
-    Args:
-        df: DataFrame to filter
-        date_col: Name of date column
-        cutoff_date: Cutoff date (keep rows > this date)
-
-    Returns:
-        Filtered DataFrame
-    """
+    """Filter DataFrame by date column, handling Date/Datetime/String types."""
     if date_col not in df.columns:
         return df
 
@@ -36,7 +25,6 @@ def _filter_by_date(df: pl.DataFrame, date_col: str, cutoff_date) -> pl.DataFram
     elif col_dtype == pl.Datetime:
         return df.filter(pl.col(date_col).cast(pl.Date) > cutoff_date)
     elif col_dtype == pl.Utf8:
-        # Handle string with potential time component
         return df.filter(pl.col(date_col).str.to_datetime().cast(pl.Date) > cutoff_date)
     else:
         logger.warning(f"Unexpected type {col_dtype} for {date_col}, attempting cast")
@@ -87,7 +75,6 @@ def process_gold_table(table_name: str, incremental: bool = True, full_refresh: 
                         cutoff_date = (datetime.strptime(last_success_date, "%Y-%m-%d") - timedelta(days=1)).date()
 
                         # Filter all source tables that have the date column
-                        # Use helper function to handle different column types
                         filtered_any = False
                         for alias, df in source_dfs.items():
                             if config.date_column in df.columns:

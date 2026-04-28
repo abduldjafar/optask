@@ -12,18 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 def _filter_by_date(df: pl.DataFrame, date_col: str, cutoff_date: date) -> pl.DataFrame:
-    """
-    Helper function to filter DataFrame by date column.
-    Handles different column types (Date, Datetime, String).
-
-    Args:
-        df: DataFrame to filter
-        date_col: Name of date column
-        cutoff_date: Cutoff date (keep rows > this date)
-
-    Returns:
-        Filtered DataFrame
-    """
+    """Filter DataFrame by date column, handling Date/Datetime/String types."""
     if date_col not in df.columns:
         return df
 
@@ -34,7 +23,6 @@ def _filter_by_date(df: pl.DataFrame, date_col: str, cutoff_date: date) -> pl.Da
     elif col_dtype == pl.Datetime:
         return df.filter(pl.col(date_col).cast(pl.Date) > cutoff_date)
     elif col_dtype == pl.Utf8:
-        # Handle string with potential time component
         return df.filter(pl.col(date_col).str.to_datetime().cast(pl.Date) > cutoff_date)
     else:
         logger.warning(f"Unexpected type {col_dtype} for {date_col}, attempting cast")
@@ -78,7 +66,6 @@ def build_fact_table_generic(config: FactTableConfig, snapshot_date: Optional[st
                             cutoff_date_obj = cutoff_date.date()
                             before_count = len(df)
 
-                            # Use helper function for filtering
                             df = _filter_by_date(df, date_col, cutoff_date_obj)
                             after_count = len(df)
 
@@ -100,7 +87,7 @@ def build_fact_table_generic(config: FactTableConfig, snapshot_date: Optional[st
                         except Exception as e:
                             logger.warning(f"Incremental filter failed: {str(e)}, using full refresh")
                             df = read_delta_safe(config.primary_table)
-                            cutoff_date_obj = None  # Reset cutoff for join tables
+                            cutoff_date_obj = None
                             metrics.add("incremental_fallback", True)
 
             if not incremental_applied:
@@ -110,24 +97,16 @@ def build_fact_table_generic(config: FactTableConfig, snapshot_date: Optional[st
             if config.joins:
                 for idx, join_spec in enumerate(config.joins, 1):
                     join_df = read_delta_safe(join_spec.source_table)
-                    join_before_count = len(join_df)
 
-                    # Apply incremental filter to join table if cutoff_date is set
-                    # Try common date columns: attendance_date, assessment_date, created_at, updated_at
-                    if cutoff_date_obj is not None and incremental_applied:
-                        date_cols_to_try = ['attendance_date', 'assessment_date', 'created_at', 'updated_at', 'date']
-                        filtered = False
-                        for date_col in date_cols_to_try:
+                    # Apply incremental filter to join table
+                    if cutoff_date_obj is not None:
+                        before_count = len(join_df)
+                        for date_col in ['attendance_date', 'assessment_date', 'created_at', 'updated_at', 'date']:
                             if date_col in join_df.columns:
                                 join_df = _filter_by_date(join_df, date_col, cutoff_date_obj)
-                                join_after_count = len(join_df)
-                                if join_after_count < join_before_count:
-                                    logger.info(f"Join table {idx} incremental: {join_before_count:,} → {join_after_count:,} rows")
-                                    metrics.add(f"join_{idx}_incremental_filtered", join_before_count - join_after_count)
-                                    filtered = True
+                                if len(join_df) < before_count:
+                                    metrics.add(f"join_{idx}_filtered", before_count - len(join_df))
                                 break
-                        if not filtered:
-                            metrics.add(f"join_{idx}_no_date_column", True)
 
                     # Apply pre-aggregation if specified
                     if join_spec.pre_aggregate:
